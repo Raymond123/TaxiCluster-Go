@@ -6,6 +6,7 @@ package main
 
 import "fmt"
 import "time"
+import "runtime"
 import "os"
 import "io"
 import "strconv"
@@ -22,10 +23,12 @@ type LabelledGPScoord struct {
 	Label int // cluster ID
 }
 
-const N int = 4
+const N int = 10
 const MinPts int = 5
 const eps float64 = 0.0003
 const filename string = "yellow_tripdata_2009-01-15_9h_21h_clean.csv"
+
+var done = make(chan bool)
 
 func main() {
 
@@ -34,12 +37,12 @@ func main() {
 	gps, minPt, maxPt := readCSVFile(filename)
 	fmt.Printf("Number of points: %d\n", len(gps))
 
-	minPt = GPScoord{-74., 40.7}
-	maxPt = GPScoord{-73.93, 40.8}
+	minPt = GPScoord{40.7, -74.}
+	maxPt = GPScoord{40.8, -73.93}
 
 	// geographical limits
-	fmt.Printf("NW:(%f , %f)\n", minPt.long, minPt.lat)
-	fmt.Printf("SE:(%f , %f) \n\n", maxPt.long, maxPt.lat)
+	fmt.Printf("SW:(%f , %f)\n", minPt.lat, minPt.long)
+	fmt.Printf("NE:(%f , %f) \n\n", maxPt.lat, maxPt.long)
 
 	// Parallel DBSCAN STEP 1.
 	incx := (maxPt.long - minPt.long) / float64(N)
@@ -77,9 +80,20 @@ func main() {
 		}
 	}
 
+	job := make(chan []LabelledGPScoord)
+	ij := make(chan int)
+
+	go produce(&grid, job, ij)
+
 	// Parallel DBSCAN STEP 2.
 	// Apply DBSCAN on each partition
 	// ...
+
+	go consume(job, ij)
+
+	<-done
+	close(ij)
+	close(job)
 
 	// Parallel DBSCAN step 3.
 	// merge clusters
@@ -87,9 +101,28 @@ func main() {
 
 	end := time.Now()
 	fmt.Printf("\nExecution time: %s of %d points\n", end.Sub(start), partitionSize)
+	fmt.Printf("Number of CPUs: %d", runtime.NumCPU())
 }
 
-// DBscan Applies DBSCAN algorithm on LabelledGPScoord points
+func produce(grid *[N][N][]LabelledGPScoord, job chan []LabelledGPScoord, ij chan int) {
+	for j := 0; j < N; j++ {
+		for i := 0; i < N; i++ {
+			job <- grid[i][j]
+			ij <- i
+			ij <- j
+		}
+	}
+
+	done <- true
+}
+
+func consume(job chan []LabelledGPScoord, ij chan int) {
+	for {
+		DBscan(<-job, MinPts, eps, <-ij*10000000+<-ij*1000000)
+	}
+}
+
+// Applies DBSCAN algorithm on LabelledGPScoord points
 // LabelledGPScoord: the slice of LabelledGPScoord points
 // MinPts, eps: parameters for the DBSCAN algorithm
 // offset: label of first cluster (also used to identify the cluster)
@@ -163,9 +196,8 @@ func readCSVFile(filename string) (coords []LabelledGPScoord, minPt GPScoord, ma
 		}
 
 		// get lattitude
-		lat, err := strconv.ParseFloat(record[8], 64)
+		lat, err := strconv.ParseFloat(record[9], 64)
 		if err != nil {
-			fmt.Printf("\n%d lat=%s\n", n, record[8])
 			panic("Data format error (lat)...")
 		}
 
@@ -178,7 +210,7 @@ func readCSVFile(filename string) (coords []LabelledGPScoord, minPt GPScoord, ma
 		}
 
 		// get longitude
-		long, err := strconv.ParseFloat(record[9], 64)
+		long, err := strconv.ParseFloat(record[8], 64)
 		if err != nil {
 			panic("Data format error (long)...")
 		}
